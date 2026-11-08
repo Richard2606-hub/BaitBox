@@ -1,0 +1,80 @@
+version: "3.9"
+
+services:
+  orchestrator:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: baitbox-orchestrator
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - CONTROL_PLANE_HOST=0.0.0.0
+      - CONTROL_PLANE_PORT=8000
+      - DATA_DIR=/app/data
+    volumes:
+      - baitbox_data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8000:8000"
+    networks:
+      - control_plane_net
+
+  console:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: baitbox-console
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - orchestrator
+    networks:
+      - control_plane_net
+
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: baitbox-caddy
+    restart: unless-stopped
+    environment:
+      - BAITBOX_DOMAIN=${BAITBOX_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - orchestrator
+      - console
+    networks:
+      - control_plane_net
+
+  # Build-only definitions so `docker compose build` prepares the disposable images
+  chamber-image:
+    build:
+      context: ./chamber
+      dockerfile: Dockerfile
+    image: baitbox-chamber:latest
+    profiles: ["build-only"]
+
+  egress-image:
+    build:
+      context: ./egress
+      dockerfile: Dockerfile
+    image: baitbox-egress:latest
+    profiles: ["build-only"]
+
+volumes:
+  baitbox_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  control_plane_net:
+    driver: bridge
