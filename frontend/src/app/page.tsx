@@ -474,11 +474,29 @@ export default function BaitBoxConsolePage() {
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || "Failed to start scan");
+        let msg = `Server returned HTTP ${res.status}`;
+        try {
+          const err = await res.json();
+          msg = err.detail || err.message || msg;
+        } catch {
+          const raw = await res.text().catch(() => "");
+          if (res.status === 502 || raw.includes("502 Bad Gateway") || raw.includes("connectex")) {
+            msg = "Backend server is warming up or reconnecting (HTTP 502). Please retry in 3 seconds.";
+          } else if (res.status === 504) {
+            msg = "Gateway timed out reaching the detonation chamber (HTTP 504). Please retry.";
+          } else {
+            msg = `Detonation service temporarily unavailable (HTTP ${res.status}).`;
+          }
+        }
+        throw new Error(msg);
       }
 
-      const initial: ScanReport = await res.json();
+      let initial: ScanReport;
+      try {
+        initial = await res.json();
+      } catch {
+        throw new Error("Received invalid response from server. Please retry in a moment.");
+      }
       setReport(initial);
       setRecentScans((prev) => [
         {
