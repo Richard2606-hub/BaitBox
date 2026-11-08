@@ -70,6 +70,7 @@ KNOWN_BRANDS: Dict[str, List[str]] = {
     "Hacker News": ["news.ycombinator.com", "ycombinator.com"],
     "Wikipedia": ["wikipedia.org", "wikimedia.org"],
     "Vultr": ["vultr.com", "vultrinference.com"],
+    "LabLab": ["lablab.ai", "lablab.build"],
     "Python.org": ["python.org"],
     "IANA": ["iana.org", "example.com", "example.org", "example.net"],
     "W3C": ["w3.org"],
@@ -93,6 +94,8 @@ BENIGN_REFERENCE_DOMAINS = (
     "kernel.org",
     "opensource.org",
     "vultr.com",
+    "lablab.ai",
+    "lablab.build",
     "httpbin.org",
     "example.com",
     "example.org",
@@ -310,6 +313,17 @@ def detect_impersonated_brand(
     )
     domain_clean = re.sub(r"[^a-z0-9]", "", domain_de_leet)
 
+    is_shared_or_risky_host = any(
+        domain.endswith(sfx) for sfx in SHARED_CLOUD_HOST_SUFFIXES
+    ) or any(domain.endswith(tld) for tld in HIGH_RISK_TLDS)
+    has_auth_or_lure_title = bool(
+        re.search(
+            r"\b(log\s*in|sign\s*in|verify|verification|wallet|account|security|clone|pdf|invoice|locked|suspended|password|connect|restore|portal)\b",
+            norm_title,
+            re.I,
+        )
+    )
+
     body_fallback_brand: Optional[str] = None
     for brand, official_domains in KNOWN_BRANDS.items():
         if _domain_matches_official(domain, official_domains):
@@ -333,7 +347,10 @@ def detect_impersonated_brand(
                 or (len(brand_consonants) >= 5 and brand_consonants in domain_clean)
             )
         )
-        if in_lookalike_domain or (is_homograph and brand_slug in domain_clean) or in_title:
+        title_impersonation = in_title and (
+            has_form_or_lure or is_shared_or_risky_host or has_auth_or_lure_title
+        )
+        if in_lookalike_domain or (is_homograph and brand_slug in domain_clean) or title_impersonation:
             return brand
         if body_fallback_brand is None and mentioned_in_body and has_form_or_lure:
             body_fallback_brand = brand
