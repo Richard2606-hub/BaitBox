@@ -66,12 +66,29 @@ KNOWN_BRANDS: Dict[str, List[str]] = {
     "LinkedIn": ["linkedin.com"],
     "TikTok": ["tiktok.com"],
     "AR24": ["ar24.fr"],
-    "GitHub": ["github.com"],
+    "GitHub": ["github.com", "github.blog", "githubusercontent.com"],
+    "GitLab": ["gitlab.com"],
+    "Bitbucket": ["bitbucket.org", "atlassian.com"],
+    "Stack Overflow": ["stackoverflow.com", "stackexchange.com"],
+    "Vercel": ["vercel.com"],
+    "Cloudflare": ["cloudflare.com"],
+    "Hugging Face": ["huggingface.co"],
+    "OpenAI": ["openai.com", "chatgpt.com"],
+    "Anthropic": ["anthropic.com", "claude.ai"],
+    "Stripe": ["stripe.com"],
+    "Shopify": ["shopify.com"],
+    "Notion": ["notion.so", "notion.com"],
+    "Figma": ["figma.com"],
+    "Canva": ["canva.com"],
+    "Slack": ["slack.com"],
+    "Zoom": ["zoom.us", "zoom.com"],
+    "Reddit": ["reddit.com"],
+    "YouTube": ["youtube.com", "youtu.be"],
     "Hacker News": ["news.ycombinator.com", "ycombinator.com"],
     "Wikipedia": ["wikipedia.org", "wikimedia.org"],
     "Vultr": ["vultr.com", "vultrinference.com"],
     "LabLab": ["lablab.ai", "lablab.build"],
-    "Python.org": ["python.org"],
+    "Python.org": ["python.org", "pypi.org"],
     "IANA": ["iana.org", "example.com", "example.org", "example.net"],
     "W3C": ["w3.org"],
     "IETF": ["ietf.org"],
@@ -81,12 +98,37 @@ KNOWN_BRANDS: Dict[str, List[str]] = {
     "HTTPBin": ["httpbin.org"],
 }
 
+REFERENCE_ONLY_BRANDS = {
+    "IANA",
+    "W3C",
+    "IETF",
+    "Python.org",
+    "Linux Kernel",
+    "Open Source Initiative",
+    "HTTPBin",
+    "Wikipedia",
+    "Hacker News",
+    "LabLab",
+    "Stack Overflow",
+    "Vercel",
+    "Cloudflare",
+    "GitLab",
+    "Bitbucket",
+    "Hugging Face",
+}
+
 BENIGN_REFERENCE_DOMAINS = (
     "wikipedia.org",
     "wikimedia.org",
     "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "stackoverflow.com",
+    "stackexchange.com",
     "ycombinator.com",
     "python.org",
+    "pypi.org",
+    "npmjs.com",
     "iana.org",
     "w3.org",
     "ietf.org",
@@ -96,6 +138,13 @@ BENIGN_REFERENCE_DOMAINS = (
     "vultr.com",
     "lablab.ai",
     "lablab.build",
+    "vercel.com",
+    "cloudflare.com",
+    "huggingface.co",
+    "openai.com",
+    "chatgpt.com",
+    "anthropic.com",
+    "claude.ai",
     "httpbin.org",
     "example.com",
     "example.org",
@@ -284,18 +333,36 @@ def is_official_brand_domain(url_or_domain: str) -> Optional[str]:
     return None
 
 
+def _registrable_base_domain(domain: str) -> str:
+    parts = [p for p in (domain or "").lower().split(".") if p]
+    if len(parts) <= 2:
+        return ".".join(parts)
+    if parts[-2] in ("com", "co", "org", "net", "gov", "edu", "ac") and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
 def detect_impersonated_brand(
     final_url: str,
     page_title: str,
     visible_text: str,
     has_form_or_lure: bool = True,
+    has_explicit_phish_kit: bool = False,
 ) -> Optional[str]:
     domain = _extract_domain(final_url)
     if any(domain == b or domain.endswith("." + b) for b in BENIGN_REFERENCE_DOMAINS):
         return None
 
+    is_shared_or_risky_host = (
+        any(domain.endswith(sfx) for sfx in SHARED_CLOUD_HOST_SUFFIXES)
+        or any(domain.endswith(tld) for tld in HIGH_RISK_TLDS)
+        or "/trap/" in final_url.lower()
+    )
+    if not is_shared_or_risky_host and is_official_brand_domain(final_url):
+        return None
+
     skeleton_domain, is_homograph = normalize_homograph_domain(domain)
-    norm_title, _ = normalize_unicode_evasion_text(page_title)
+    norm_title, title_unicode_obf = normalize_unicode_evasion_text(page_title)
     norm_text, _ = normalize_unicode_evasion_text(visible_text)
     combined = f"{norm_title} {norm_text} {final_url.lower()}"
 
@@ -304,8 +371,14 @@ def detect_impersonated_brand(
         if not _domain_matches_official(domain, KNOWN_BRANDS["Pinnacle Trust"]):
             return "Pinnacle Trust"
 
+    host_without_cloud_sfx = skeleton_domain
+    for sfx in SHARED_CLOUD_HOST_SUFFIXES:
+        if host_without_cloud_sfx.endswith(sfx):
+            host_without_cloud_sfx = host_without_cloud_sfx[: -len(sfx)]
+            break
+
     domain_de_leet = (
-        skeleton_domain.replace("1", "l")
+        host_without_cloud_sfx.replace("1", "l")
         .replace("0", "o")
         .replace("3", "e")
         .replace("4", "a")
@@ -313,19 +386,36 @@ def detect_impersonated_brand(
     )
     domain_clean = re.sub(r"[^a-z0-9]", "", domain_de_leet)
 
-    is_shared_or_risky_host = any(
-        domain.endswith(sfx) for sfx in SHARED_CLOUD_HOST_SUFFIXES
-    ) or any(domain.endswith(tld) for tld in HIGH_RISK_TLDS)
+    deceptive_tokens = ("-login", "-verify", "-secure", "-update", "-hold", "account-", "auth-", "-clone", "lognx")
+    has_deceptive_host = (
+        any(tok in skeleton_domain for tok in deceptive_tokens)
+        or bool(re.search(r"[a-z]+[0135][a-z]+", skeleton_domain))
+        or is_homograph
+        or "/trap/" in final_url.lower()
+    )
+
     has_auth_or_lure_title = bool(
         re.search(
-            r"\b(log\s*in|sign\s*in|verify|verification|wallet|account|security|clone|pdf|invoice|locked|suspended|password|connect|restore|portal)\b",
+            r"\b(log\s*in|sign\s*in|verify|verification|wallet|clone|invoice|locked|suspended|password|restore)\b",
             norm_title,
             re.I,
         )
     )
 
+    # Check if the site's own custom domain label is explicitly named in the page title
+    base_dom = _registrable_base_domain(domain)
+    own_site_label = base_dom.split(".")[0] if base_dom else ""
+    own_site_named_in_title = (
+        not is_shared_or_risky_host
+        and not has_deceptive_host
+        and len(own_site_label) >= 4
+        and own_site_label in norm_title
+    )
+
     body_fallback_brand: Optional[str] = None
     for brand, official_domains in KNOWN_BRANDS.items():
+        if brand in REFERENCE_ONLY_BRANDS:
+            continue
         if _domain_matches_official(domain, official_domains):
             continue
         brand_key = brand.lower()
@@ -339,20 +429,45 @@ def detect_impersonated_brand(
 
         # Check look-alike or vowel-dropped domain (e.g. m3tamsk -> metamask, adobesign -> adobe, roblox.com.et -> roblox)
         brand_consonants = re.sub(r"[aeiou]", "", brand_slug)
-        in_lookalike_domain = (
-            len(brand_slug) >= 4
-            and (
-                brand_slug in re.sub(r"[^a-z0-9]", "", skeleton_domain)
+        if len(brand_slug) >= 6:
+            in_lookalike_domain = (
+                brand_slug in re.sub(r"[^a-z0-9]", "", host_without_cloud_sfx)
                 or brand_slug in domain_clean
-                or (len(brand_consonants) >= 5 and brand_consonants in domain_clean)
+                or (
+                    len(brand_consonants) >= 5
+                    and brand_consonants in domain_clean
+                    and (is_shared_or_risky_host or has_deceptive_host)
+                )
             )
-        )
-        title_impersonation = in_title and (
-            has_form_or_lure or is_shared_or_risky_host or has_auth_or_lure_title
+        elif len(brand_slug) >= 4:
+            in_lookalike_domain = bool(
+                re.search(
+                    rf"(^|[.\-0-9]){re.escape(brand_slug)}([.\-0-9]|sign|id|login|verify|secure|auth|online|support|track|express|delivery|2u|clicks|$)",
+                    domain_de_leet,
+                )
+            )
+        else:
+            in_lookalike_domain = False
+
+        title_impersonation = (
+            in_title
+            and not own_site_named_in_title
+            and (
+                is_shared_or_risky_host
+                or has_deceptive_host
+                or has_explicit_phish_kit
+                or title_unicode_obf
+                or (has_form_or_lure and has_auth_or_lure_title)
+            )
         )
         if in_lookalike_domain or (is_homograph and brand_slug in domain_clean) or title_impersonation:
             return brand
-        if body_fallback_brand is None and mentioned_in_body and has_form_or_lure:
+        if (
+            body_fallback_brand is None
+            and mentioned_in_body
+            and has_form_or_lure
+            and (is_shared_or_risky_host or has_deceptive_host or has_explicit_phish_kit)
+        ):
             body_fallback_brand = brand
     return body_fallback_brand
 
@@ -407,10 +522,31 @@ def compute_rule_signals(
             or has_crypto_lure
             or has_exfil_webhook
             or has_cloned_sig
-            or len(bundle.forms) > 0
+            or title_unicode_obf
+        ),
+        has_explicit_phish_kit=(
+            has_exfil_webhook
+            or has_cloned_sig
+            or has_crypto_lure
+            or has_urgency
+            or title_unicode_obf
+            or has_tls_anomaly
         ),
     )
     injection_findings = detect_prompt_injections(bundle)
+    skeleton_domain, is_homograph = normalize_homograph_domain(domain)
+    deceptive_tokens = ("-login", "-verify", "-secure", "-update", "-hold", "account-", "auth-", "-clone", "lognx")
+    has_leet = bool(re.search(r"[a-z]+[0135][a-z]+", skeleton_domain))
+    matched_tld = next((tld for tld in HIGH_RISK_TLDS if domain.endswith(tld)), None)
+    matched_cloud = next((sfx for sfx in SHARED_CLOUD_HOST_SUFFIXES if domain.endswith(sfx)), None)
+    is_deceptive_or_insecure_host = (
+        any(tok in skeleton_domain for tok in deceptive_tokens)
+        or has_leet
+        or is_homograph
+        or "/trap/" in bundle.final_url
+        or bool(re.match(r"^\d{1,3}(\.\d{1,3}){3}$", domain))
+        or bundle.final_url.lower().startswith("http://")
+    )
 
     # 1. Impersonated brand on unrelated domain
     if impersonated_brand:
@@ -485,7 +621,19 @@ def compute_rule_signals(
             if _domain_matches_official(domain, official_domains):
                 is_trusted_login = True
                 break
-        if not is_trusted_login:
+        is_suspicious_login_context = (
+            impersonated_brand is not None
+            or matched_cloud is not None
+            or matched_tld is not None
+            or is_deceptive_or_insecure_host
+            or has_urgency
+            or has_crypto_lure
+            or has_exfil_webhook
+            or has_cloned_sig
+            or has_tls_anomaly
+            or bool(injection_findings)
+        )
+        if not is_trusted_login and is_suspicious_login_context:
             signals.append(
                 RuleSignal(
                     code="CREDENTIAL_HARVEST_FORM",
@@ -533,7 +681,6 @@ def compute_rule_signals(
         )
 
     # 6. Look-alike / deceptive domain patterns & IDN Homograph / Punycode attacks
-    skeleton_domain, is_homograph = normalize_homograph_domain(domain)
     if is_homograph:
         signals.append(
             RuleSignal(
@@ -547,8 +694,6 @@ def compute_rule_signals(
             )
         )
 
-    deceptive_tokens = ("-login", "-verify", "-secure", "-update", "-hold", "account-", "auth-", "-clone", "lognx")
-    has_leet = bool(re.search(r"[a-z]+[0135][a-z]+", skeleton_domain))
     if any(tok in skeleton_domain for tok in deceptive_tokens) or has_leet or "/trap/" in bundle.final_url:
         if impersonated_brand or has_password_form or any(tok in skeleton_domain for tok in deceptive_tokens) or has_leet:
             signals.append(
@@ -561,7 +706,6 @@ def compute_rule_signals(
             )
 
     # 7. High-risk TLD or abused free shared cloud hosting
-    matched_tld = next((tld for tld in HIGH_RISK_TLDS if domain.endswith(tld)), None)
     if matched_tld:
         signals.append(
             RuleSignal(
@@ -572,7 +716,6 @@ def compute_rule_signals(
             )
         )
 
-    matched_cloud = next((sfx for sfx in SHARED_CLOUD_HOST_SUFFIXES if domain.endswith(sfx)), None)
     if matched_cloud and (
         impersonated_brand
         or has_password_form
@@ -595,9 +738,15 @@ def compute_rule_signals(
             )
         )
 
-    # 8. Multi-hop redirect chain
+    # 8. Multi-hop redirect chain (only when crossing distinct base domains or /trap/ routes)
     redirect_hops = max(0, len(bundle.hops) - 1)
-    if redirect_hops >= 2:
+    distinct_base_domains = {
+        _registrable_base_domain(h.domain or _extract_domain(h.url))
+        for h in bundle.hops
+        if (h.domain or _extract_domain(h.url))
+    }
+    cross_domain_or_trap_redirect = len(distinct_base_domains) > 1 or "/trap/" in bundle.final_url
+    if redirect_hops >= 2 and (cross_domain_or_trap_redirect or signals):
         signals.append(
             RuleSignal(
                 code="MULTI_HOP_REDIRECT_CHAIN",
@@ -606,7 +755,7 @@ def compute_rule_signals(
                 score_delta=20,
             )
         )
-    elif redirect_hops == 1:
+    elif redirect_hops == 1 and (cross_domain_or_trap_redirect or signals):
         signals.append(
             RuleSignal(
                 code="SINGLE_REDIRECT_HOP",

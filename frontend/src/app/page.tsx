@@ -210,6 +210,15 @@ const REAL_WEB_PRESETS = [
     requireApproval: false,
     simulateTimeout: false,
   },
+  {
+    label:
+      "Live Official Hackathon Website: Vultr Agent Rush Hackathon on LabLab (lablab.build)",
+    shortLabel: "✅ Vultr Hackathon (lablab.build Safe)",
+    badge: "Likely safe",
+    input: "https://lablab.build/ai-hackathons/vultr-hackathon",
+    requireApproval: false,
+    simulateTimeout: false,
+  },
 ];
 
 const DEMO_PRESETS = [
@@ -313,10 +322,11 @@ export default function BaitBoxConsolePage() {
 
   const fetchTelemetryAndHistory = async () => {
     try {
+      const ts = Date.now();
       const [telRes, scansRes, modRes] = await Promise.all([
-        fetch(`${API_BASE}/api/system/telemetry`),
-        fetch(`${API_BASE}/api/scans?limit=25`),
-        fetch(`${API_BASE}/api/system/models`),
+        fetch(`${API_BASE}/api/system/telemetry?t=${ts}`, { cache: "no-store" }),
+        fetch(`${API_BASE}/api/scans?limit=50&t=${ts}`, { cache: "no-store" }),
+        fetch(`${API_BASE}/api/system/models?t=${ts}`, { cache: "no-store" }),
       ]);
       if (telRes.ok) {
         const t = await telRes.json();
@@ -336,7 +346,9 @@ export default function BaitBoxConsolePage() {
         const m = await modRes.json();
         setVultrModels(m.models || []);
       }
-      const feedRes = await fetch(`${API_BASE}/api/phishing/live-feed`);
+      const feedRes = await fetch(`${API_BASE}/api/phishing/live-feed?t=${ts}`, {
+        cache: "no-store",
+      });
       if (feedRes.ok) {
         const f = await feedRes.json();
         setLiveCatalog(f.catalog || []);
@@ -468,6 +480,60 @@ export default function BaitBoxConsolePage() {
 
       const initial: ScanReport = await res.json();
       setReport(initial);
+      setRecentScans((prev) => [
+        {
+          scan_id: initial.scan_id,
+          share_token: initial.share_token,
+          status: initial.status,
+          normalized_url: initial.normalized_url,
+          masked_url: initial.masked_url,
+          verdict: initial.verdict,
+          impersonated_brand: initial.impersonated_brand,
+          risk_score: initial.risk_score,
+          created_at: initial.created_at,
+          completed_at: initial.completed_at,
+        },
+        ...prev.filter((s) => s.scan_id !== initial.scan_id),
+      ]);
+
+      let finished = false;
+      const syncScanState = async (): Promise<boolean> => {
+        try {
+          const fullRes = await fetch(
+            `${API_BASE}/api/scans/${initial.scan_id}?t=${Date.now()}`,
+            { cache: "no-store" }
+          );
+          if (!fullRes.ok) return false;
+          const fullReport: ScanReport = await fullRes.json();
+          setReport(fullReport);
+          if (fullReport.hops && fullReport.hops.length > 0) {
+            setSelectedHopIdx(fullReport.hops.length - 1);
+          }
+          if (
+            fullReport.status === "completed" ||
+            fullReport.status === "timed_out" ||
+            fullReport.status === "failed"
+          ) {
+            finished = true;
+            setIsScanning(false);
+            await fetchTelemetryAndHistory();
+            return true;
+          }
+        } catch {
+          // Ignore transient poll errors
+        }
+        return false;
+      };
+
+      // Reliable polling loop (ensures Vercel/Cloudflare proxy SSE buffering never stalls UI or History sync)
+      (async () => {
+        for (let i = 0; i < 65; i++) {
+          await new Promise((r) => setTimeout(r, 1500));
+          if (finished) break;
+          const done = await syncScanState();
+          if (done) break;
+        }
+      })();
 
       const es = new EventSource(
         `${API_BASE}/api/scans/${initial.scan_id}/events`
@@ -485,16 +551,7 @@ export default function BaitBoxConsolePage() {
             data.event === "scan_timed_out" ||
             data.event === "scan_failed"
           ) {
-            const fullRes = await fetch(
-              `${API_BASE}/api/scans/${initial.scan_id}`
-            );
-            if (fullRes.ok) {
-              const fullReport: ScanReport = await fullRes.json();
-              setReport(fullReport);
-              if (fullReport.hops && fullReport.hops.length > 0) {
-                setSelectedHopIdx(fullReport.hops.length - 1);
-              }
-            }
+            await syncScanState();
           }
 
           if (
@@ -502,9 +559,10 @@ export default function BaitBoxConsolePage() {
             data.event === "scan_timed_out" ||
             data.event === "scan_failed"
           ) {
+            finished = true;
             setIsScanning(false);
             es.close();
-            fetchTelemetryAndHistory();
+            await fetchTelemetryAndHistory();
           }
         } catch {
           // Ignore malformed event
@@ -513,18 +571,7 @@ export default function BaitBoxConsolePage() {
 
       es.onerror = async () => {
         es.close();
-        setIsScanning(false);
-        const fullRes = await fetch(
-          `${API_BASE}/api/scans/${initial.scan_id}`
-        );
-        if (fullRes.ok) {
-          const fullReport: ScanReport = await fullRes.json();
-          setReport(fullReport);
-          if (fullReport.hops && fullReport.hops.length > 0) {
-            setSelectedHopIdx(fullReport.hops.length - 1);
-          }
-        }
-        fetchTelemetryAndHistory();
+        await syncScanState();
       };
     } catch (err: any) {
       setErrorMsg(
@@ -536,7 +583,10 @@ export default function BaitBoxConsolePage() {
 
   const loadHistoricalScan = async (scanId: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/scans/${scanId}`);
+      const res = await fetch(
+        `${API_BASE}/api/scans/${scanId}?t=${Date.now()}`,
+        { cache: "no-store" }
+      );
       if (res.ok) {
         const loaded: ScanReport = await res.json();
         setReport(loaded);
@@ -1790,6 +1840,118 @@ export default function BaitBoxConsolePage() {
                 </section>
               </div>
             )}
+
+            {/* Live Synced Recent Detonations Strip inside Scanner Console */}
+            <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-cyan-400" />
+                  <h2 className="text-sm font-bold text-white uppercase tracking-wider">
+                    Live Synced Detonation History ({recentScans.length})
+                  </h2>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={fetchTelemetryAndHistory}
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    Sync Now
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTab("history");
+                      fetchTelemetryAndHistory();
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-xs text-cyan-300 border border-cyan-500/30 font-semibold cursor-pointer"
+                  >
+                    Full History View →
+                  </button>
+                </div>
+              </div>
+
+              {recentScans.length === 0 ? (
+                <p className="text-xs text-slate-400">
+                  No scans recorded yet. Paste any website link above to detonate it inside the chamber.
+                </p>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-slate-800">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-slate-950 text-slate-400 uppercase text-[11px]">
+                      <tr>
+                        <th className="p-2.5">Scan ID</th>
+                        <th className="p-2.5">Website URL</th>
+                        <th className="p-2.5">Verdict</th>
+                        <th className="p-2.5">Brand</th>
+                        <th className="p-2.5">Risk</th>
+                        <th className="p-2.5">Time</th>
+                        <th className="p-2.5">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800 bg-slate-900/40">
+                      {recentScans.slice(0, 10).map((s) => (
+                        <tr
+                          key={s.scan_id}
+                          className={`hover:bg-slate-800/40 ${
+                            report?.scan_id === s.scan_id
+                              ? "bg-cyan-950/30"
+                              : ""
+                          }`}
+                        >
+                          <td className="p-2.5 font-mono font-bold text-cyan-300">
+                            {s.scan_id}
+                          </td>
+                          <td className="p-2.5 font-mono text-slate-200 truncate max-w-md">
+                            {s.normalized_url}
+                          </td>
+                          <td className="p-2.5 font-bold">
+                            <span
+                              className={
+                                s.verdict === "Dangerous"
+                                  ? "text-red-400"
+                                  : s.verdict === "Suspicious"
+                                  ? "text-amber-400"
+                                  : s.verdict === "Likely safe"
+                                  ? "text-emerald-400"
+                                  : "text-cyan-300"
+                              }
+                            >
+                              {s.verdict || s.status}
+                            </span>
+                          </td>
+                          <td className="p-2.5 text-slate-300">
+                            {s.impersonated_brand || "-"}
+                          </td>
+                          <td className="p-2.5 font-mono">
+                            {s.risk_score ?? 0}/100
+                          </td>
+                          <td className="p-2.5 text-slate-400">
+                            {new Date(s.created_at).toLocaleTimeString()}
+                          </td>
+                          <td className="p-2.5 flex items-center gap-1.5">
+                            <button
+                              onClick={() => loadHistoricalScan(s.scan_id)}
+                              className="px-2 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 font-semibold cursor-pointer"
+                            >
+                              Inspect
+                            </button>
+                            <button
+                              onClick={() => {
+                                setInputText(s.normalized_url);
+                                startScan(s.normalized_url);
+                              }}
+                              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold cursor-pointer"
+                            >
+                              Re-Scan
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
           </>
         )}
 

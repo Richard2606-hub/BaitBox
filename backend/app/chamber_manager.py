@@ -1052,15 +1052,30 @@ class ChamberManager:
                         )
                     )
 
+        has_any_password = any(f.has_password or f.has_card_or_otp for f in forms)
+        has_exfil_or_clone = any(
+            "exfil-webhook://" in s or "cloned-kit://" in s for s in external_scripts
+        )
         impersonated_brand = detect_impersonated_brand(
             final_url,
             page_title,
             visible_text,
-            has_form_or_lure=(len(forms) > 0),
+            has_form_or_lure=(has_any_password or has_exfil_or_clone),
+            has_explicit_phish_kit=has_exfil_or_clone,
         )
-        has_any_password = any(f.has_password for f in forms)
         official_brand = is_official_brand_domain(final_url)
-        has_untrusted_password = has_any_password and (official_brand is None)
+        final_host = (urlparse(final_url).hostname or "").lower()
+        from .analyst import HIGH_RISK_TLDS, SHARED_CLOUD_HOST_SUFFIXES
+        is_suspicious_pw_host = (
+            impersonated_brand is not None
+            or any(final_host.endswith(sfx) for sfx in SHARED_CLOUD_HOST_SUFFIXES)
+            or any(final_host.endswith(tld) for tld in HIGH_RISK_TLDS)
+            or "/trap/" in final_url.lower()
+            or final_url.lower().startswith("http://")
+            or has_exfil_or_clone
+            or any(tok in final_host for tok in ("-login", "-verify", "-secure", "-update", "-hold", "account-", "auth-", "-clone", "lognx"))
+        )
+        has_untrusted_password = has_any_password and (official_brand is None) and is_suspicious_pw_host
 
         # Render hop screenshots and final annotated screenshot
         total_hops = max(1, len(raw_redirects))

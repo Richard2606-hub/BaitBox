@@ -320,6 +320,11 @@ class EvidenceStore:
     def save_report(self, report: ScanReport) -> None:
         payload = report.model_dump_json()
         with self._connect() as conn:
+            if report.status == "completed" and report.normalized_url:
+                conn.execute(
+                    "DELETE FROM scans WHERE normalized_url = ? AND scan_id != ? AND verdict != ?",
+                    (report.normalized_url, report.scan_id, report.verdict or ""),
+                )
             conn.execute(
                 """
                 INSERT INTO scans (
